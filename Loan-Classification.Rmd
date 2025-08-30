@@ -1,0 +1,152 @@
+---
+title: "Loan Data Analysis & Modelling"
+author: "Sabilla Farah Annisa"
+date: "2025-08-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Packages
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(caret)
+library(randomForest)
+library(pROC)
+library(recipes)   #
+library(readxl)
+library(dplyr)
+library(magrittr)
+library(broom)
+library(MLmetrics)
+set.seed(123)
+
+# Data asli
+Dtasli <- read_excel("C:/SARAH/IDX Data Scientist/Final/loan_data_2007_2014.xlsx")
+Book1  <- read_excel("C:/SARAH/IDX Data Scientist/Final/Book1.xlsx")
+
+# Ambil sample random 10 ribu baris
+set.seed(123)
+sample_df <- Book1 %>% sample_n(10000)
+
+
+# Membinerkan kolom
+sample_df <- sample_df %>%
+  mutate(
+    XE = case_when(XE == "60 months" ~ 0,
+                   XE == "36 months" ~ 1,
+                   TRUE ~ NA_real_),
+    XH = case_when(
+      XH == "A" ~ 0, XH == "B" ~ 1, XH == "C" ~ 2,
+      XH == "D" ~ 3, XH == "E" ~ 4, XH == "F" ~ 5,
+      XH == "G" ~ 6, XH == "H" ~ 7, TRUE ~ NA_real_
+    )
+    # dst untuk XI, XJ, XM, XN, XL (copy sesuai script kamu)
+  )
+
+
+sample_df <- sample_df %>% 
+  rename(
+    ID                        = XA,
+    ID_Anggota                = XB,
+    Jumlah_Pinjaman           = XC,
+    Jumlah_yang_Didanai       = XD,
+    Jangka_Waktu              = XE,
+    Tingkat_Bunga             = XF,
+    Angsuran                  = XG,
+    Tingkat_Pinjaman          = XH,
+    Sub_Tingkat_Pinjaman      = XI,
+    Status_Kepemilikan_Rumah  = XJ,
+    Pendapatan_Tahunan        = XK,
+    Status_Verifikasi         = XL,
+    Tanggal_Pendanaan         = XM,
+    Status_Pinjaman           = XN,
+    Rasio_DTI                 = XO,
+    Riwayat_Tunggakan_2_Tahun = XP,
+    Garis_Kredit_Terawal      = XQ,
+    Akun_Terbuka              = XR,
+    Catatan_Publik            = XS,
+    Saldo_Kredit_Bergulir     = XT,
+    Tingkat_Pemanfaatan_Kredit_Bergulir = XU,
+    Total_Akun_Kredit         = XV,
+    Total_Pembayaran          = XW,
+    Total_Pembayaran_Investor = XX,
+    Bunga_Diterima            = XY
+  )
+
+
+# 1. Pilih variabel
+df_model <- sample_df %>% 
+  select(Status_Pinjaman, Jumlah_Pinjaman, Tingkat_Bunga, 
+         Rasio_DTI, Pendapatan_Tahunan, 
+         Status_Kepemilikan_Rumah, Status_Verifikasi) %>%
+  na.omit()
+
+# 2. Mapping Status jadi biner
+df_model <- df_model %>%
+  mutate(Status_Label = case_when(
+    Status_Pinjaman == 0 ~ "Fully Paid",
+    Status_Pinjaman == 1 ~ "Charged Off",
+    Status_Pinjaman == 2 ~ "Default",
+    Status_Pinjaman == 3 ~ "Current",
+    Status_Pinjaman == 4 ~ "Late 31-120",
+    Status_Pinjaman == 5 ~ "Late 16-30",
+    Status_Pinjaman == 6 ~ "In Grace Period",
+    TRUE ~ "Other"
+  ),
+  Status_Biner = ifelse(Status_Label %in% c("Charged Off","Default"), 1, 0))
+
+table(df_model$Status_Label)
+table(df_model$Status_Biner)
+# 3. Split train-test
+set.seed(123)
+train_index <- createDataPartition(df_model$Status_Biner, p=0.8, list=FALSE)
+train_df <- df_model[train_index, ]
+test_df  <- df_model[-train_index, ]
+
+# 4. Logistic Regression
+logit_model <- glm(
+  Status_Biner ~ Jumlah_Pinjaman + Tingkat_Bunga +
+    Rasio_DTI + Pendapatan_Tahunan +
+    Status_Kepemilikan_Rumah + Status_Verifikasi,
+  data = train_df,
+  family = binomial
+)
+
+summary(logit_model)
+# Evaluasi
+test_df$pred_prob <- predict(logit_model, newdata=test_df, type="response")
+test_df$pred_class <- ifelse(test_df$pred_prob>0.5, 1, 0)
+
+cm <- confusionMatrix(
+  factor(test_df$pred_class), 
+  factor(test_df$Status_Biner),
+  positive="1"
+)
+cm
+# ROC Curve
+roc_obj <- roc(test_df$Status_Biner, test_df$pred_prob)
+plot(roc_obj, col="blue", lwd=2, main="ROC Curve - Logistic Regression")
+abline(a=0, b=1, lty=2, col="red")
+auc(roc_obj)
+results <- data.frame(
+  Model = c("Logistic Regression", "Random Forest (SMOTE)"),
+  Accuracy = c(0.547, 0.8504), 
+  Precision = c(0.546, 0.9232),
+  Recall = c(0.545, 0.7802),
+  F1 = c(0.541, 0.796)
+)
+
+results_long <- results %>%
+  pivot_longer(cols=-Model, names_to="Metric", values_to="Score")
+
+ggplot(results_long, aes(x=Metric, y=Score, fill=Model)) +
+  geom_col(position="dodge", width=0.6, alpha=0.9) +
+  geom_text(aes(label=scales::percent(Score, accuracy=0.1)),
+            position=position_dodge(width=0.6), vjust=-0.4, size=3.5) +
+  labs(title="Perbandingan Metrik Evaluasi Model", x="Metrik", y="Skor") +
+  theme_minimal() +
+  theme(legend.position="top")
